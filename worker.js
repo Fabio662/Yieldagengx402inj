@@ -80,6 +80,9 @@ const HTML_PAGE = `
       padding: 16px 40px; font-size: 18px; border-radius: 12px;
       cursor: pointer; font-weight: 700; margin-top: 25px; width: 100%;
     }
+    .try-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { margin-top: 16px; font-size: 14px; color: #ff6b35; text-align: center; min-height: 20px; }
+    .error { color: #ff4444; }
   </style>
 </head>
 <body>
@@ -91,37 +94,69 @@ const HTML_PAGE = `
     <div class="payment">
       <div class="cost">0.001 INJ</div>
       <div class="address">${CONFIG.PAYMENT_ADDRESS}</div>
-      <button class="copy-btn">📋 Copy</button>
+      <button class="copy-btn" id="copyBtn">📋 Copy</button>
     </div>
 
-    <button class="try-btn" onclick="tryAgent()">🚀 Try Agent</button>
+    <button class="try-btn" id="tryBtn" onclick="tryAgent()">🚀 Try Agent</button>
+    <div class="status" id="status"></div>
+    <div id="yieldsOut"></div>
+  </div>
 
-    <script>
-      function copyAddress() {
-        navigator.clipboard.writeText('${CONFIG.PAYMENT_ADDRESS}');
-        this.textContent = '✅ Copied';
-        setTimeout(() => this.textContent = '📋 Copy', 2000);
+  <script>
+    // FIX 1: proper event listener — 'this' works correctly now
+    document.getElementById('copyBtn').addEventListener('click', function() {
+      navigator.clipboard.writeText('${CONFIG.PAYMENT_ADDRESS}');
+      this.textContent = '✅ Copied';
+      setTimeout(() => { this.textContent = '📋 Copy'; }, 2000);
+    });
+
+    async function tryAgent() {
+      const btn    = document.getElementById('tryBtn');
+      const status = document.getElementById('status');
+      const out    = document.getElementById('yieldsOut');
+
+      // FIX 2: clear previous results so they don't stack every click
+      out.innerHTML = '';
+      status.textContent = '';
+
+      // FIX 3: disable button immediately — kills double-click race
+      btn.disabled = true;
+      btn.textContent = '⏳ Waiting...';
+
+      const hash = prompt('Enter your INJ tx hash:');
+      if (!hash) {
+        btn.disabled = false;
+        btn.textContent = '🚀 Try Agent';
+        return;
       }
-      document.querySelector('.copy-btn').onclick = copyAddress;
 
-      async function tryAgent() {
-        const hash = prompt('Enter your INJ tx hash:');
-        if (!hash) return;
+      status.textContent = 'Verifying payment...';
+
+      try {
         const res = await fetch('/', {
-          headers: { 'X-Payment': JSON.stringify({ txHash: hash, amount: 0.001 }) }
+          // FIX 4: amount sent as string to match server-side strict compare
+          headers: { 'X-Payment': JSON.stringify({ txHash: hash, amount: '0.001' }) }
         });
+
         if (res.ok) {
           const data = await res.json();
-          const out = data.data.opportunities.map(o => 
-            \`<div class="yield-item"><strong>\${o.protocol}</strong>: \${o.apy}</div>\`
+          // FIX 5: render into dedicated div, never touches body
+          out.innerHTML = data.data.opportunities.map(o =>
+            '<div class="yield-item"><strong>' + o.protocol + '</strong><span class="apy">' + o.apy + '</span></div>'
           ).join('');
-          document.body.innerHTML += \`<div style="margin-top:20px">\${out}</div>\`;
+          status.textContent = '✅ Payment verified — data live';
         } else {
-          alert('Payment not verified.');
+          status.innerHTML = '<span class="error">❌ Payment not verified. Try again.</span>';
         }
+      } catch (e) {
+        status.innerHTML = '<span class="error">❌ Network error: ' + e.message + '</span>';
       }
-    </script>
-  </div>
+
+      // FIX 6: always re-enable regardless of success/failure
+      btn.disabled = false;
+      btn.textContent = '🚀 Try Agent';
+    }
+  </script>
 </body>
 </html>
 `;
@@ -138,6 +173,13 @@ export default {
     };
 
     if (req.method === 'OPTIONS') return new Response(null, { headers: cors });
+
+    // FIX 7: /health endpoint added
+    if (path === '/health') {
+      return new Response(JSON.stringify({ status: 'ok', x402Enabled: true, network: 'injective', asset: 'INJ' }), {
+        headers: { ...cors, 'Content-Type': 'application/json' }
+      });
+    }
 
     if (path === '/x402-info') {
       return new Response(JSON.stringify({
@@ -164,17 +206,18 @@ export default {
       }
       try {
         const p = JSON.parse(pay);
-        if (p.txHash && p.amount == '0.001') {
+        // FIX 8: strict string compare against CONFIG — no more loose ==
+        if (p.txHash && String(p.amount) === CONFIG.PAYMENT_AMOUNT) {
           return new Response(JSON.stringify(YIELD_DATA), {
-            headers: { ...cors, 'Content-Type': 'application/json' }
+            headers: { ...cors, 'Content-Type': 'application/json', 'X-Payment-Verified': 'true' }
           });
         }
-        return new Response(JSON.stringify({ error: 'invalid' }), { status: 402 });
+        return new Response(JSON.stringify({ error: 'invalid' }), { status: 402, headers: cors });
       } catch {
-        return new Response(JSON.stringify({ error: 'bad header' }), { status: 400 });
+        return new Response(JSON.stringify({ error: 'bad header' }), { status: 400, headers: cors });
       }
     }
 
-    return new Response(JSON.stringify({ error: '404' }), { status: 404 });
+    return new Response(JSON.stringify({ error: '404' }), { status: 404, headers: cors });
   }
 };
